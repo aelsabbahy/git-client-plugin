@@ -70,6 +70,7 @@ import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.Lists;
+import java.util.HashSet;
 
 /**
  * @author <a href="mailto:nicolas.deloof@gmail.com">Nicolas De Loof</a>
@@ -3583,9 +3584,249 @@ public abstract class GitAPITestCase extends TestCase {
         assertTrue("ssh.exe not found", w.cgit().getSSHExecutable().exists());
     }
 
+    private ObjectId commitOneFile(String fileName) throws IOException, GitException, InterruptedException {
+        final String fileContent = fileName + " file content " + UUID.randomUUID().toString();
+        w.touch(fileName, fileContent);
+        w.git.add(fileName);
+        w.git.commit(fileName + " message - " + fileContent);
+        ObjectId commit = w.head();
+        assertNotNull("Failed to commit '" + fileName + "' with content '" + fileContent + "'", commit);
+        assertTrue("File '" + fileName + "' missing", w.exists(fileName));
+        assertEquals("File '" + fileName + "' content mismatch", fileContent, w.contentOf(fileName));
+        return commit;
+    }
+
+    private void assertFilesExist(String... fileNames) {
+        for (String fileName : fileNames) {
+            assertTrue("file '" + fileName + "' missing", w.exists(fileName));
+        }
+    }
+
+    private void assertFilesDoNotExist(String... fileNames) {
+        for (String fileName : fileNames) {
+            assertFalse("file '" + fileName + "' found", w.exists(fileName));
+        }
+    }
+
+    private void assertShowChangedPaths(List<String> changedPaths, String... expectedFileNames) {
+        for (String expectedFileName : expectedFileNames) {
+            assertTrue("Missing '" + expectedFileName + "' in " + changedPaths, changedPaths.contains(expectedFileName));
+        }
+
+        List<String> expectedFileNameList = Arrays.asList(expectedFileNames);
+        List<String> testPaths = new ArrayList<String>(changedPaths);
+        boolean changedList = testPaths.removeAll(expectedFileNameList);
+        assertTrue("Extra file names found " + testPaths + " in " + changedPaths + ", expected " + Arrays.toString(expectedFileNames), testPaths.isEmpty());
+        assertTrue("None of the expected file names [" + expectedFileNames + "] were removed from " + changedPaths, changedList);
+
+        /* command line git implementation duplicates paths in the returned
+         * list.  That seems ok if it is intentional, since the list does
+         * contain the expected elements, even though it contains extra
+         * copies of the expected elements.
+         */
+        Set<String> uniqueChangedPaths = new HashSet<String>(changedPaths);
+        assertEquals("Wrong unique changed path count in " + changedPaths, expectedFileNames.length, uniqueChangedPaths.size());
+        if (w.git instanceof JGitAPIImpl) {
+            assertEquals("Wrong changed path count in " + changedPaths, expectedFileNames.length, changedPaths.size());
+        }
+    }
+
+    private void branchAndCheckout(String branchName) throws GitException, InterruptedException {
+        w.git.branch(branchName);
+        w.git.checkout(branchName);
+    }
+
+    /**
+     * A merge which combines more than two branches in a single commit (an
+     * "octopus" merge) should by correctly processed by showChangePaths for
+     * command line git and JGit implementations.
+     *
+     * Creates a structure like:
+     *
+     * base -> branch a -> branch a-b 
+     *      -> branch c 
+     *      -> branch d -> branch d-e -> branch d-e-f
+     *
+     * Performs a merge of all three branches and checks
+     * showChangePaths behaves as expected.
+     *
+     * @throws Exception
+     */
+    public void test_octopus_merge_showChangedPaths() throws Exception {
+        String[] addedFileNames = {"a", "b", "c", "d", "e", "f", "g"};
+
+        w.init();
+        assertEquals("Wrong branch count before commit", 0, w.git.getBranches().size());
+        /* What should showChangePaths return for an empty repo? */
+
+        ObjectId firstCommit = commitOneFile("base");
+        assertEquals("Wrong branch count at base", 1, w.git.getBranches().size());
+        assertFilesDoNotExist(addedFileNames);
+
+        /* First commit in the repository behaves differently than second and later */
+        List<String> changedPathsOneArg = w.git.showChangedPaths(firstCommit);
+        if (w.git instanceof CliGitAPIImpl) {
+            /* A 1 element list with an empty string as element 1 is unexpected */
+            assertEquals("First change not an empty string: '" + changedPathsOneArg.get(0) + "'", "", changedPathsOneArg.get(0));
+            assertEquals("Wrong length on first change: ", 1, changedPathsOneArg.size());
+        } else {
+            /* JGit implementation returned an empty list as expected */
+            assertTrue("First change not empty: " + changedPathsOneArg, changedPathsOneArg.isEmpty());
+        }
+
+        List<String> changedPathsTwoArgs = w.git.showChangedPaths(null, firstCommit);
+        if (w.git instanceof CliGitAPIImpl) {
+            /* A 1 element list with an empty string as element 1 is unexpected */
+            assertEquals("First two arg change not an empty string: '" + changedPathsTwoArgs.get(0) + "'", "", changedPathsTwoArgs.get(0));
+            assertEquals("Wrong length on first two arg change: ", 1, changedPathsTwoArgs.size());
+        } else {
+            /* JGit implementation returned an empty list as expected */
+            assertTrue("First two arg change not empty: " + changedPathsTwoArgs, changedPathsTwoArgs.isEmpty());
+        }
+
+        /* Javadoc of showChangedPaths allows the second argument to be null
+         * and assigns semantics to the null seecond argument, but this throws
+         * a null pointer exception for both JGit and command line git.
+         */
+        try {
+            changedPathsTwoArgs = w.git.showChangedPaths(firstCommit, null);
+            assertNotNull("Result is null", changedPathsTwoArgs); // unreached
+        } catch (NullPointerException npe) {
+        }
+
+        changedPathsTwoArgs = w.git.showChangedPaths(firstCommit, firstCommit);
+        if (w.git instanceof CliGitAPIImpl) {
+            /* A 1 element list with an empty string as element 1 is unexpected */
+            assertEquals("First two arg change not an empty string: '" + changedPathsTwoArgs.get(0) + "'", "", changedPathsTwoArgs.get(0));
+            assertEquals("Wrong length on first two arg change: ", 1, changedPathsTwoArgs.size());
+        } else {
+            /* JGit implementation returned an empty list as expected */
+            assertTrue("First two arg change not empty: " + changedPathsTwoArgs, changedPathsTwoArgs.isEmpty());
+        }
+
+        // Create branch a
+        branchAndCheckout("a");
+        ObjectId aCommit = commitOneFile("a");
+        assertFilesExist("base", "a");
+        assertFilesDoNotExist("b", "c", "d", "e", "f", "g");
+
+        assertShowChangedPaths(w.git.showChangedPaths(aCommit), "a");
+        assertShowChangedPaths(w.git.showChangedPaths(null, aCommit), "a");
+        assertShowChangedPaths(w.git.showChangedPaths(firstCommit, aCommit), "a");
+
+        /* Inverted argument expected to return empty list since aCommit is not
+         * a parent of firstCommit.
+         */
+        changedPathsTwoArgs = w.git.showChangedPaths(aCommit, firstCommit);
+        if (w.git instanceof CliGitAPIImpl) {
+            assertFalse("empty: " + changedPathsTwoArgs, changedPathsTwoArgs.isEmpty());
+            assertEquals("First two arg change not an empty string: '" + changedPathsTwoArgs.get(0) + "'", "", changedPathsTwoArgs.get(0));
+            assertEquals("Wrong length on first two arg change: ", 1, changedPathsTwoArgs.size());
+        } else {
+            /* Unexpected non-empty list with inverted argument order */
+            assertEquals("Wrong two arg changed path 1", "a", changedPathsTwoArgs.get(0));
+            assertEquals("Wrong two arg changed path count", 1, changedPathsTwoArgs.size());
+        }
+
+        try {
+            changedPathsTwoArgs = w.git.showChangedPaths(aCommit, null);
+            assertEquals("Wrong two arg changed path 1", "a", changedPathsTwoArgs.get(0));
+            assertEquals("Wrong two arg changed path count", 1, changedPathsTwoArgs.size());
+        } catch (NullPointerException npe) {
+        }
+
+        // Create branch a-b
+        branchAndCheckout("a-b");
+        ObjectId bCommit = commitOneFile("b");
+        assertFilesExist("base", "a", "b");
+        assertFilesDoNotExist("c", "d", "e", "f", "g");
+
+        assertShowChangedPaths(w.git.showChangedPaths(bCommit), "b");
+        assertShowChangedPaths(w.git.showChangedPaths(null, bCommit), "b");
+        assertShowChangedPaths(w.git.showChangedPaths(aCommit, bCommit), "b");
+        assertShowChangedPaths(w.git.showChangedPaths(firstCommit, bCommit), "a", "b");
+
+        // Create branch c
+        w.git.checkout("master");
+        branchAndCheckout("c");
+        ObjectId cCommit = commitOneFile("c");
+        assertFilesExist("base", "c");
+        assertFilesDoNotExist("a", "b", "d", "e", "f", "g");
+
+        assertShowChangedPaths(w.git.showChangedPaths(cCommit), "c");
+        assertShowChangedPaths(w.git.showChangedPaths(null, cCommit), "c");
+        assertShowChangedPaths(w.git.showChangedPaths(firstCommit, cCommit), "c");
+
+        // Create branch d
+        w.git.checkout("master");
+        branchAndCheckout("d");
+        ObjectId dCommit = commitOneFile("d");
+        assertFilesExist("base", "d");
+        assertFilesDoNotExist("a", "b", "c", "e", "f", "g");
+
+        assertShowChangedPaths(w.git.showChangedPaths(dCommit), "d");
+        assertShowChangedPaths(w.git.showChangedPaths(null, dCommit), "d");
+        assertShowChangedPaths(w.git.showChangedPaths(firstCommit, dCommit), "d");
+
+        // Create branch d-e
+        branchAndCheckout("d-e");
+        ObjectId eCommit = commitOneFile("e");
+        assertFilesExist("base", "d", "e");
+        assertFilesDoNotExist("a", "b", "c", "f", "g");
+
+        assertShowChangedPaths(w.git.showChangedPaths(eCommit), "e");
+        assertShowChangedPaths(w.git.showChangedPaths(null, eCommit), "e");
+        assertShowChangedPaths(w.git.showChangedPaths(firstCommit, eCommit), "d", "e");
+
+        // Create branch d-e-f
+        branchAndCheckout("d-e-f");
+        ObjectId fCommit = commitOneFile("f");
+        assertFilesExist("base", "d", "e", "f");
+        assertFilesDoNotExist("a", "b", "c", "g");
+
+        assertShowChangedPaths(w.git.showChangedPaths(fCommit), "f");
+        assertShowChangedPaths(w.git.showChangedPaths(null, fCommit), "f");
+        assertShowChangedPaths(w.git.showChangedPaths(firstCommit, fCommit), "d", "e", "f");
+
+        // Create branch g
+        w.git.checkout("master");
+        branchAndCheckout("g");
+        ObjectId gCommit = commitOneFile("g");
+        assertFilesExist("base", "g");
+        assertFilesDoNotExist("a", "b", "c", "d", "e", "f");
+
+        assertShowChangedPaths(w.git.showChangedPaths(gCommit), "g");
+        assertShowChangedPaths(w.git.showChangedPaths(null, gCommit), "g");
+        assertShowChangedPaths(w.git.showChangedPaths(firstCommit, gCommit), "g");
+
+        if (w.git instanceof CliGitAPIImpl) {
+            w.git.merge().setStrategy(MergeCommand.Strategy.OCTOPUS)
+                    .setRevisionToMerge(bCommit)
+                    .addRevisionToMerge(cCommit)
+                    .addRevisionToMerge(fCommit)
+                    .execute();
+        } else {
+            /* JGit does not implement octopus merge */
+            w.cmd("git merge a-b c d-e-f");
+        }
+        ObjectId mergeCommit = w.head();
+
+        assertShowChangedPaths(w.git.showChangedPaths(mergeCommit), addedFileNames);
+        assertShowChangedPaths(w.git.showChangedPaths(null, mergeCommit), addedFileNames);
+
+        /* Assure that prior results are still valid */
+        assertShowChangedPaths(w.git.showChangedPaths(aCommit), "a");
+        assertShowChangedPaths(w.git.showChangedPaths(bCommit), "b");
+        assertShowChangedPaths(w.git.showChangedPaths(cCommit), "c");
+        assertShowChangedPaths(w.git.showChangedPaths(dCommit), "d");
+        assertShowChangedPaths(w.git.showChangedPaths(eCommit), "e");
+        assertShowChangedPaths(w.git.showChangedPaths(fCommit), "f");
+        assertShowChangedPaths(w.git.showChangedPaths(gCommit), "g");
+    }
+
     /**
      * Returns the prefix for the remote branches while querying them.
-     * @return remote branch pregix, for example, "remotes/"
+     * @return remote branch prefix, for example, "remotes/"
      */
     protected abstract String getRemoteBranchPrefix();
 
