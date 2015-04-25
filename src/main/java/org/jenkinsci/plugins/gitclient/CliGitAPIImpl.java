@@ -12,7 +12,6 @@ import hudson.FilePath;
 import hudson.Functions;
 import hudson.Launcher;
 import com.google.common.collect.Lists;
-import com.google.common.collect.Sets;
 import hudson.Launcher.LocalLauncher;
 import hudson.Util;
 import hudson.model.TaskListener;
@@ -27,24 +26,6 @@ import hudson.util.Secret;
 
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang.StringUtils;
-import org.apache.http.HttpHost;
-import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.Credentials;
-import org.apache.http.auth.NTCredentials;
-import org.apache.http.auth.UsernamePasswordCredentials;
-import org.apache.http.client.CredentialsProvider;
-import org.apache.http.client.config.AuthSchemes;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.conn.routing.HttpRoutePlanner;
-import org.apache.http.conn.ssl.SSLContextBuilder;
-import org.apache.http.conn.ssl.SSLContexts;
-import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
-import org.apache.http.impl.client.BasicCredentialsProvider;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.client.HttpClients;
-import org.apache.http.impl.conn.DefaultProxyRoutePlanner;
 import org.eclipse.jgit.lib.Constants;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Ref;
@@ -58,9 +39,6 @@ import org.kohsuke.stapler.framework.io.WriterOutputStream;
 import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.security.KeyManagementException;
-import java.security.KeyStoreException;
-import java.security.NoSuchAlgorithmException;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -74,8 +52,6 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.SSLException;
 
 /**
  * Implementation class using command line CLI ran as external command.
@@ -723,7 +699,11 @@ public class CliGitAPIImpl extends LegacyCompatibleGitAPIImpl {
      */
     public ChangelogCommand changelog() {
         return new ChangelogCommand() {
+
+            /** Equivalent to the git-log raw format but using ISO 8601 date format - also prevent to depend on git CLI future changes */
+            public static final String RAW = "commit %H%ntree %T%nparent %P%nauthor %aN <%aE> %ai%ncommitter %cN <%cE> %ci%n%n%w(76,4,4)%s%n%n%b";
             final List<String> revs = new ArrayList<String>();
+
             Integer n = null;
             Writer out = null;
 
@@ -760,7 +740,8 @@ public class CliGitAPIImpl extends LegacyCompatibleGitAPIImpl {
             }
 
             public void execute() throws GitException, InterruptedException {
-                ArgumentListBuilder args = new ArgumentListBuilder(gitExe, "whatchanged", "--no-abbrev", "-M", "--pretty=raw");
+                ArgumentListBuilder args = new ArgumentListBuilder(gitExe, "whatchanged", "--no-abbrev", "-M");
+                args.add("--format="+RAW);
                 if (n!=null)
                     args.add("-n").add(n);
                 for (String rev : this.revs)
@@ -890,8 +871,8 @@ public class CliGitAPIImpl extends LegacyCompatibleGitAPIImpl {
                 if (remoteTracking && isAtLeastVersion(1,8,2,0)) {
                     args.add("--remote");
 
-                    for (String key : submodBranch.keySet()) {
-                        launchCommand("config", "-f", ".gitmodules", "submodule."+key+".branch", submodBranch.get(key));
+                    for (Map.Entry<String, String> entry : submodBranch.entrySet()) {
+                        launchCommand("config", "-f", ".gitmodules", "submodule."+entry.getKey()+".branch", entry.getValue());
                     }
                 }
                 if ((ref != null) && !ref.isEmpty()) {
@@ -1866,7 +1847,10 @@ public class CliGitAPIImpl extends LegacyCompatibleGitAPIImpl {
                     if (Pattern.compile("index\\.lock").matcher(e.getMessage()).find()) {
                         throw new GitLockFailedException("Could not lock repository. Please try again", e);
                     } else {
-                        throw new GitException("Could not checkout " + branch + " with start point " + ref, e);
+                        if (branch != null)
+                            throw new GitException("Could not checkout " + branch + " with start point " + ref, e);
+                        else
+                            throw new GitException("Could not checkout " + ref, e);
                     }
                 } catch (InterruptedException e) {
                     final File indexFile = new File(workspace.getPath() + File.separator
@@ -2109,6 +2093,9 @@ public class CliGitAPIImpl extends LegacyCompatibleGitAPIImpl {
 
     /** {@inheritDoc} */
     public boolean isCommitInRepo(ObjectId commit) throws InterruptedException {
+        if (commit == null) {
+            return false;
+        }
         try {
             List<ObjectId> revs = revList(commit.name());
 

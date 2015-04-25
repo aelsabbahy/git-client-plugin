@@ -586,12 +586,14 @@ public abstract class GitAPITestCase extends TestCase {
 
     public void test_detect_commit_in_repo() throws Exception {
         w.init();
+        assertFalse(w.git.isCommitInRepo(null)); // NPE safety check
         w.touch("file1");
         w.git.add("file1");
         w.git.commit("commit1");
         assertTrue("HEAD commit not found", w.git.isCommitInRepo(w.head()));
         // this MAY fail if commit has this exact sha1, but please admit this would be unlucky
         assertFalse(w.git.isCommitInRepo(ObjectId.fromString("1111111111111111111111111111111111111111")));
+        assertFalse(w.git.isCommitInRepo(null)); // NPE safety check
     }
 
     @Deprecated
@@ -720,6 +722,19 @@ public abstract class GitAPITestCase extends TestCase {
         w.git.add(fileName);
         w.git.commit(fileName);
 
+        /* JENKINS-27910 reported that certain cyrillic file names
+         * failed to delete if the encoding was not UTF-8.
+         */
+        String fileNameSwim = "\u00d0\u00bf\u00d0\u00bb\u00d0\u00b0\u00d0\u00b2\u00d0\u00b0\u00d0\u00bd\u00d0\u00b8\u00d0\u00b5-swim.png";
+        w.touch(fileNameSwim, "content " + fileNameSwim);
+        w.git.add(fileNameSwim);
+        w.git.commit(fileNameSwim);
+
+        String fileNameFace = "\u00d0\u00bb\u00d0\u00b8\u00d1\u2020\u00d0\u00be-face.png";
+        w.touch(fileNameFace, "content " + fileNameFace);
+        w.git.add(fileNameFace);
+        w.git.commit(fileNameFace);
+
         w.touch(".gitignore", ".test");
         w.git.add(".gitignore");
         w.git.commit("ignore");
@@ -737,6 +752,8 @@ public abstract class GitAPITestCase extends TestCase {
         assertFalse(w.exists(fileName1));
         assertFalse(w.exists(fileName2));
         assertEquals("content " + fileName, w.contentOf(fileName));
+        assertEquals("content " + fileNameFace, w.contentOf(fileNameFace));
+        assertEquals("content " + fileNameSwim, w.contentOf(fileNameSwim));
         String status = w.cmd("git status");
         assertTrue("unexpected status " + status, status.contains("working directory clean"));
 
@@ -927,7 +944,7 @@ public abstract class GitAPITestCase extends TestCase {
         /* Add tag to working repo and without pushing it to the bare repo */
         w.tag("tag1");
         assertTrue("tag1 wasn't created", w.git.tagExists("tag1"));
-        w.git.push().to(new URIish(bare.repoPath())).tags(false).execute();
+        w.git.push().ref("master").to(new URIish(bare.repoPath())).tags(false).execute();
         assertFalse("tag1 wasn't pushed", bare.cmd("git tag").contains("tag1"));
 
         /* Add tag to working repo without pushing it to the bare
@@ -936,7 +953,7 @@ public abstract class GitAPITestCase extends TestCase {
          */
         w.tag("tag3");
         assertTrue("tag3 wasn't created", w.git.tagExists("tag3"));
-        w.git.push().to(new URIish(bare.repoPath())).execute();
+        w.git.push().ref("master").to(new URIish(bare.repoPath())).execute();
         assertFalse("tag3 was pushed", bare.cmd("git tag").contains("tag3"));
 
         /* Add another tag to working repo and push tags to the bare repo */
@@ -945,7 +962,7 @@ public abstract class GitAPITestCase extends TestCase {
         w.git.commit("commit2");
         w.tag("tag2");
         assertTrue("tag2 wasn't created", w.git.tagExists("tag2"));
-        w.git.push().to(new URIish(bare.repoPath())).tags(true).execute();
+        w.git.push().ref("master").to(new URIish(bare.repoPath())).tags(true).execute();
         assertTrue("tag1 wasn't pushed", bare.cmd("git tag").contains("tag1"));
         assertTrue("tag2 wasn't pushed", bare.cmd("git tag").contains("tag2"));
         assertTrue("tag3 wasn't pushed", bare.cmd("git tag").contains("tag3"));
@@ -1065,8 +1082,9 @@ public abstract class GitAPITestCase extends TestCase {
      * branches than command line git prunes during fetch.  This test
      * should be used to evaluate future versions of JGit to see if
      * pruning behavior more closely emulates command line git.
+     * 
+     * This has been fixed using a workaround.
      */
-    @NotImplementedInJGit
     public void test_fetch_with_prune() throws Exception {
         WorkingArea bare = new WorkingArea();
         bare.init(true);
@@ -1131,7 +1149,7 @@ public abstract class GitAPITestCase extends TestCase {
          * on that old git version.
          */
         int expectedBranchCount = 3;
-        if (!w.cgit().isAtLeastVersion(1, 7, 9, 0)) {
+        if (newArea.git instanceof CliGitAPIImpl && !w.cgit().isAtLeastVersion(1, 7, 9, 0)) {
             expectedBranchCount = 4;
         }
         assertEquals("Wrong count in " + remoteBranches, expectedBranchCount, remoteBranches.size());
